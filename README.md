@@ -106,10 +106,14 @@ When a stop won't spin, say it's still on cool-down, the game answers with a
 quick red flash. The screen shows NO SPIN for that. BOX FULL only comes up
 after a Pokémon.
 
-The screen goes dark after 30 seconds to save battery, and a tap or a button
+The screen goes dark after 30 seconds by default to save battery. In the USB console (115200 baud), press `t` to cycle through 15, 30, 60 and 120 seconds. The selected timeout is saved. A tap or a button
 wakes it. The buttons work with it dark. On battery it goes to sleep after
 15 minutes without a connection, and A or B wakes it. All the settings are
 saved, and so is the lock.
+
+## Ball selection
+
+The ball type is selected in Pokémon GO, not on the device. For Great Balls or Ultra Balls, disable the game's auto-throw setting, select the desired ball in the accessory settings and use the appropriate button-press mode. Actual behavior depends on the game version and must be verified on hardware. No ball-type information is inferred from the LED prompts.
 
 ## Battery life
 
