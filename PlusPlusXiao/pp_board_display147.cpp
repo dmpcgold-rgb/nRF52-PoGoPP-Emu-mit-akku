@@ -63,7 +63,7 @@ struct PersistedBoardSettings {
   uint8_t advertise;   // 0/1
   uint8_t lastDropReason;
   uint8_t backlight;   // index into kBacklightLevels
-  uint8_t unusedLastCatchMode;  // v0.1; ignored
+  uint8_t unusedLastCatchMode;  // v2: screen timeout index
   uint8_t locked;      // 0/1 (v0.8; earlier builds wrote 0)
   uint32_t lifetimeConnSec;
 };
@@ -75,6 +75,8 @@ static bool gAutoSpin = true;
 static bool gAdvertise = true;
 static uint8_t gLastDropReason = 0;
 static uint8_t gBacklight = 1;
+static uint8_t gScreenTimeoutIndex = 1;
+static const uint32_t kScreenTimeouts[] = { 15000, 30000, 60000, 120000 };
 static uint32_t gLifetimeConnSec = 0;
 static bool gLocked = false;
 static bool gSettingsLoaded = false;
@@ -94,7 +96,7 @@ static bool loadSettings()
   }
   int n = f.read(reinterpret_cast<uint8_t*>(&rec), sizeof(rec));
   f.close();
-  if (n != static_cast<int>(sizeof(rec)) || rec.magic != kSettingsMagic || rec.version != 1 || rec.size != sizeof(rec)) {
+  if (n != static_cast<int>(sizeof(rec)) || rec.magic != kSettingsMagic || (rec.version != 1 && rec.version != 2) || rec.size != sizeof(rec)) {
     return false;
   }
   // A v0.1 record may say new-only: that is catching, so all.
@@ -103,6 +105,7 @@ static bool loadSettings()
   gAdvertise = rec.advertise != 0;
   gLastDropReason = rec.lastDropReason;
   gBacklight = rec.backlight < sizeof(kBacklightLevels) ? rec.backlight : 1;
+  gScreenTimeoutIndex = rec.version == 2 && rec.unusedLastCatchMode < 4 ? rec.unusedLastCatchMode : 1;
   gLifetimeConnSec = rec.lifetimeConnSec;
   gLocked = rec.locked != 0;
   return true;
@@ -112,7 +115,8 @@ static void saveSettings()
 {
   PersistedBoardSettings rec = {};
   rec.magic = kSettingsMagic;
-  rec.version = 1;
+  rec.version = 2;
+  rec.unusedLastCatchMode = gScreenTimeoutIndex;
   rec.size = sizeof(rec);
   rec.catchMode = gCatchMode;
   rec.autoSpin = gAutoSpin ? 1 : 0;
@@ -126,11 +130,14 @@ static void saveSettings()
   File f(InternalFS);
   if (!f.open(kSettingsPath, FILE_O_WRITE)) {
     Serial.println("Board settings: write failed");
+    gSavePending = true;
+    gSaveDueAt = millis() + 10000;
     return;
   }
-  f.write(reinterpret_cast<const uint8_t*>(&rec), sizeof(rec));
+  const size_t written = f.write(reinterpret_cast<const uint8_t*>(&rec), sizeof(rec));
   f.close();
-  gSavePending = false;
+  gSavePending = written != sizeof(rec);
+  if (gSavePending) gSaveDueAt = millis() + 10000;
 }
 
 // A save rewrites the file in flash, which holds up the loop for a while.
@@ -144,7 +151,6 @@ static void saveSettingsSoon()
 
 // ---------------- screen ----------------
 
-static constexpr uint32_t kScreenOnMs = 30000;
 static constexpr uint32_t kBannerMs = 3000;
 static constexpr uint32_t kWarningBannerMs = 8000;
 
@@ -435,7 +441,7 @@ static uint32_t gSleepHoldAt = 0;
 static void printConsoleHelp()
 {
   Serial.println("Keys: p press, s auto spin, a advertise fast, b backlight, r restart screen,");
-  Serial.println("      l lock, i status, W wipe pairing (capital W), ? this list");
+  Serial.println("      l lock, t screen timeout, i status, W wipe pairing (capital W), ? this list");
 }
 
 static void printStatus(const BoardRefs& refs, bool connected)
@@ -477,6 +483,13 @@ static void serviceConsole(const BoardRefs& refs, bool connected, bool authentic
         break;
       case 's': actToggleAutoSpin(); break;
       case 'b': actCycleBacklight(); break;
+      case 't':
+        gScreenTimeoutIndex = (gScreenTimeoutIndex + 1) % 4;
+        saveSettingsSoon();
+        screenWake();
+        Serial.print("Screen timeout seconds: ");
+        Serial.println(kScreenTimeouts[gScreenTimeoutIndex] / 1000);
+        break;
       case 'l': actToggleLock(); break;
       case 'r':
         Serial.println("Screen -> restarted");
@@ -595,9 +608,9 @@ void ppBoardOnEvent(PPLedEvent evt, const char* label)
     case PP_LED_POKEMON: showBanner(PP_UI_BANNER_POKEMON, kBannerMs); break;
     case PP_LED_NEW_POKEMON: showBanner(PP_UI_BANNER_NEW_POKEMON, kBannerMs); break;
     case PP_LED_POKESTOP: showBanner(PP_UI_BANNER_POKESTOP, kBannerMs); break;
-    case PP_LED_CAUGHT: ++gCountCaught; showBanner(PP_UI_BANNER_CAUGHT, kBannerMs); break;
-    case PP_LED_FLED: ++gCountFled; showBanner(PP_UI_BANNER_FLED, kBannerMs); break;
-    case PP_LED_ITEMS: ++gCountSpins; showBanner(PP_UI_BANNER_ITEMS, kBannerMs); break;
+    case PP_LED_CAUGHT: if (gCountCaught < UINT16_MAX) ++gCountCaught; showBanner(PP_UI_BANNER_CAUGHT, kBannerMs); break;
+    case PP_LED_FLED: if (gCountFled < UINT16_MAX) ++gCountFled; showBanner(PP_UI_BANNER_FLED, kBannerMs); break;
+    case PP_LED_ITEMS: if (gCountSpins < UINT16_MAX) ++gCountSpins; showBanner(PP_UI_BANNER_ITEMS, kBannerMs); break;
     // The app turned a spin down (a stop on cool-down, say): nothing to fix.
     case PP_LED_SPIN_FAILED: showBanner(PP_UI_BANNER_NO_SPIN, kBannerMs); break;
     // Warnings want action in the game: they light the screen.
@@ -617,6 +630,7 @@ void ppBoardSetNote(const char* text)
 void ppBoardOnDisconnect(uint8_t reason)
 {
   gLastDropReason = reason;
+  saveSettingsSoon();
   Serial.print("Link dropped: ");
   Serial.print(dropReasonText(reason));
   Serial.print(" (0x");
@@ -726,7 +740,7 @@ void ppBoardTick(const BoardRefs& refs)
     gBanner = PP_UI_BANNER_IDLE;
   }
 
-  if (gScreenOn && (now - gScreenOnSince) >= kScreenOnMs && !gTouchDown) {
+  if (gScreenOn && (now - gScreenOnSince)  >= kScreenTimeouts[gScreenTimeoutIndex] && !gTouchDown) {
     screenSleep();
   }
   if (gScreenOn) {
